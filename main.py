@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-avito-scraper — Улучшенный парсер Авито с надежным извлечением цены и локации
+avito-scraper — Улучшенный парсер Авито с заменой location на region из запроса
 """
 
 import requests
@@ -48,7 +48,7 @@ def get_avito_page_content(url):
     try:
         response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
-        time.sleep(2)  # Увеличиваем задержку для избежания блокировки
+        time.sleep(2)
         return BeautifulSoup(response.text, 'html.parser')
     except requests.exceptions.RequestException as e:
         print(f"❌ Ошибка при запросе: {e}")
@@ -60,9 +60,10 @@ def safe_extract_text(element, default="Не указано"):
         return element.text.strip()
     return default
 
-def parse_avito_ads(soup):
+def parse_avito_ads(soup, region_name):
     """
-    Извлекает информацию об объявлениях с множественными селекторами.
+    Извлекает информацию об объявлениях.
+    Вместо location — использует region из запроса.
     """
     ads = []
     
@@ -85,7 +86,6 @@ def parse_avito_ads(soup):
     
     if not items:
         print("⚠️ Не удалось найти элементы объявлений.")
-        # Сохраним HTML для отладки
         with open("debug_page.html", "w", encoding="utf-8") as f:
             f.write(soup.prettify())
         print("⚠️ HTML страницы сохранен в debug_page.html для анализа")
@@ -128,58 +128,24 @@ def parse_avito_ads(soup):
             for selector in price_selectors:
                 price_elem = item.select_one(selector)
                 if price_elem:
-                    # Пробуем получить content атрибут для meta тега
                     if price_elem.name == 'meta' and price_elem.get('content'):
                         price = price_elem['content']
                     else:
                         price = price_elem.text.strip()
                     break
             
-            # Очищаем цену от лишних символов
             if price != "Цена не указана":
                 price = re.sub(r'[^\d\s]', '', price).strip()
-                price = re.sub(r'\s+', ' ', price)  # Убираем множественные пробелы
-            
-            # ===== ЛОКАЦИЯ =====
-            location = "Не указано"
-            location_selectors = [
-                'div[data-marker="item-address"]',
-                'span[data-marker="item-address"]',
-                'div.geo-address',
-                'span.address',
-                'div.item-address',
-                'span[class*="address"]'
-            ]
-            
-            for selector in location_selectors:
-                loc_elem = item.select_one(selector)
-                if loc_elem:
-                    location = loc_elem.text.strip()
-                    break
-            
-            # ===== ДАТА ===== (дополнительно)
-            date = "Не указано"
-            date_selectors = [
-                'div[data-marker="item-date"]',
-                'span.date',
-                'div.item-date'
-            ]
-            
-            for selector in date_selectors:
-                date_elem = item.select_one(selector)
-                if date_elem:
-                    date = date_elem.text.strip()
-                    break
-            
-            # Экранирование для CSV
+                price = re.sub(r'\s+', ' ', price)
+
+            # Экранирование
             title = title.replace(";", ",").replace("\n", " ").replace("\r", " ")
-            location = location.replace(";", ",").replace("\n", " ").replace("\r", " ")
-            
+
+            # Формируем данные без location и date
             ad_data = {
                 "title": title,
                 "price": price,
-                "location": location,
-                "date": date,
+                "region": region_name,  # ← Используем регион из запроса
                 "link": link
             }
             
@@ -204,7 +170,7 @@ def save_to_csv(data, filename="avito_ads.csv"):
     
     try:
         with open(filepath, 'w', newline='', encoding='utf-8-sig') as csvfile:
-            fieldnames = ['title', 'price', 'location', 'date', 'link']
+            fieldnames = ['title', 'price', 'region', 'link']  # ← Без location и date
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             
             writer.writeheader()
@@ -231,9 +197,10 @@ def main():
     # Автоматическое преобразование региона
     region_lower = args.region.strip().lower()
     final_region = REGIONS.get(region_lower, region_lower)
+    display_region = args.region.strip()  # Используем оригинальное имя для вывода
 
     print(f"🔍 Поиск: {args.query}")
-    print(f"📍 Регион: {final_region}")
+    print(f"📍 Регион: {display_region}")
     print(f"📄 Страниц: {args.max_pages}")
     if args.min_price:
         print(f"💰 Минимальная цена: {args.min_price}")
@@ -244,7 +211,6 @@ def main():
     all_ads = []
     base_search_url = f"{BASE_URL}/{final_region}?q={quote(args.query)}"
     
-    # Добавляем параметры цены
     if args.min_price:
         base_search_url += f"&pmin={args.min_price}"
     if args.max_price:
@@ -267,7 +233,7 @@ def main():
                 f.write(soup.prettify())
             print("⚠️ HTML сохранен в debug_page.html")
 
-        ads = parse_avito_ads(soup)
+        ads = parse_avito_ads(soup, display_region)  # ← Передаём регион как строку
         if not ads:
             print(f"⚠️ На странице {page} не найдено объявлений")
             if page == 1:
@@ -277,13 +243,11 @@ def main():
         all_ads.extend(ads)
         print(f"✅ На странице {page}: {len(ads)} объявлений")
 
-        # Проверка на последнюю страницу
         next_button = soup.find('a', {'data-marker': 'pagination-next'})
         if not next_button:
             print("🔚 Это последняя страница")
             break
 
-        # Задержка между страницами
         time.sleep(1)
 
     # Сохраняем результаты
@@ -293,10 +257,9 @@ def main():
         filename = f"avito_{safe_query}_{final_region}_{timestamp}.csv"
         save_to_csv(all_ads, filename)
         
-        # Выводим примеры данных
         print("\n📋 Примеры найденных объявлений:")
         for i, ad in enumerate(all_ads[:3], 1):
-            print(f"{i}. {ad['title'][:50]}... - {ad['price']} - {ad['location']}")
+            print(f"{i}. {ad['title'][:50]}... - {ad['price']} ₽ - {ad['region']}")
     else:
         print("❌ Не найдено ни одного объявления")
 
