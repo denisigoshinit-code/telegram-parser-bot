@@ -12,7 +12,7 @@
 
 ## 🚀 Как использовать?
 
-bash
+``` bash
 # 1. Установка
 pip install -r requirements.txt
 
